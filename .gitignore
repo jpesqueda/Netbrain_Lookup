@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+.env
+*.csv
+*.log
+*_Raw.json
+Reports/
+hosts.txt
