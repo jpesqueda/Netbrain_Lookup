@@ -109,6 +109,26 @@ class LookupApp(App):
         self.query_one("#results", DataTable).add_columns(*(name for name, _ in TABLE_COLUMNS))
         self.query_one("#password", Input).focus()
         self.args.password = None
+        if self.args.demo:
+            rows = []
+            for ip, status, switch, port in [
+                ("192.0.2.10", "found", "LAB-SW-01", "Gi1/0/10"),
+                ("192.0.2.20", "found", "LAB-SW-02", "Gi1/0/20"),
+                ("192.0.2.30", "not-found", "", ""),
+                ("192.0.2.40", "error", "", ""),
+            ]:
+                row = engine.empty_row(engine.make_target(ip), status)
+                if status == "found":
+                    row.update(endpoint_ip=ip, endpoint_mac="aa:bb:cc:dd:ee:"+ip.split(".")[-1],
+                               switch_name=switch, switch_port=port, lookup_method="DIRECT_IP",
+                               verification="PRIMARY", port_description="LAB-ENDPOINT")
+                rows.append(row)
+            engine.annotate_matches(rows)
+            self.receive("result", {"rows": rows, "output": "Not written (demo)", "log": "Not written (demo)",
+                                    "elapsed": 0, "fallback": {"requested": 0}, "workers": 5, "mode": "DEMO"})
+            self.query_one("#state", Static).update("OFFLINE DEMO — simulated results only; no network requests or reports.")
+            self.query_one("#start", Button).disabled = True
+            self.query_one("#new", Button).disabled = True
 
     def field(self, name):
         return self.query_one("#"+name, Input).value.strip()
@@ -133,6 +153,8 @@ class LookupApp(App):
             self.exit(self.last_code)
 
     def action_new_lookup(self):
+        if self.args.demo:
+            return
         if self.running:
             self.notify("Lookup is still running.", severity="warning")
             return

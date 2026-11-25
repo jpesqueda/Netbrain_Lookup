@@ -1122,6 +1122,7 @@ GENERIC TEST DATA
         help=f"Base seconds for exponential retry backoff (default: {DEFAULT_RETRY_BACKOFF:g}; sequence 1, 2, 4...)",
     )
     advanced.add_argument("-v", "--verbose", action="store_true", help="Write additional request/target diagnostics to the .log file")
+    p.add_argument("--demo", action="store_true", help="Open offline TUI with synthetic results (no network or reports)")
     p.add_argument("--interactive", action="store_true", help="Open interactive terminal UI")
     p.add_argument("--non-interactive", action="store_true", help="No prompts; use NETBRAIN_PASSWORD")
     p.add_argument("--ca-file", help="Corporate CA certificate bundle")
@@ -1134,11 +1135,11 @@ GENERIC TEST DATA
     args = p.parse_args(argv)
     if args.timeout < 1 or not 0 <= args.retries <= 10 or not 0 <= args.retry_backoff <= 60:
         p.error("Timeout must be positive; retries 0-10 and backoff 0-60.")
-    if args.interactive and args.non_interactive:
+    if (args.interactive or args.demo) and args.non_interactive:
         p.error("Interactive modes are mutually exclusive")
     if args.insecure and args.ca_file:
         p.error("--insecure and --ca-file are mutually exclusive")
-    if args.interactive and args.oneip_info:
+    if (args.interactive or args.demo) and args.oneip_info:
         p.error("Diagnostics use the traditional CLI")
     return args
 
@@ -2400,7 +2401,7 @@ def oneip_lookup(
         params = {"ip": target["value"], "beginIndex": 0, "count": page_size}
         result = nb.try_call("GET", path, params=params)
         candidates = records_from(result) if result else []
-        records = filter_target_records(candidates, target)
+        records = filter_oneip_records(candidates, target)
 
         if result:
             entry: dict[str, Any] = {"path": path, "params": params, "response": result}
@@ -2443,7 +2444,7 @@ def oneip_lookup(
             if result is not None:
                 accepted_any = True
                 candidates = records_from(result)
-                records = filter_target_records(candidates, target)
+                records = filter_oneip_records(candidates, target)
                 entry: dict[str, Any] = {
                     "path": path,
                     "params": {"mac": f"<{style}>", "beginIndex": 0, "count": page_size},
@@ -2540,7 +2541,7 @@ def oneip_lookup(
             break
 
         records = records_from(result)
-        matches = filter_target_records(records, target)
+        matches = filter_oneip_records(records, target)
         entry = {"path": path, "params": params, "record_count": len(records)}
         if error := api_status_error(result):
             entry["api_error"] = error
@@ -2593,7 +2594,7 @@ def scan_oneip_after_id(
             break
 
         records = records_from(result)
-        matches = filter_target_records(records, target)
+        matches = filter_oneip_records(records, target)
         entry = {"path": path, "params": params, "record_count": len(records), "pagination": "afterId"}
         if error := api_status_error(result):
             entry["api_error"] = error
@@ -2689,6 +2690,25 @@ def after_id_cursor(
 # ============================================================================
 # SECTION 11 - RESULT PARSING, NORMALIZATION, AND CORRELATION
 # ============================================================================
+
+def filter_oneip_records(records, target):
+    """Use the endpoint address field, not unrelated switch or description fields."""
+    result = []
+    for record in records:
+        names = ("mac", "macAddress", "endpointMac") if target["type"] == "MAC" else ("ip", "ipAddress", "endpointIp")
+        for name in names:
+            value = ci_get(record, name)
+            if not value:
+                continue
+            try:
+                matches = normalize_mac(str(value)) == normalize_mac(target["value"]) if target["type"] == "MAC" else ipaddress.IPv4Address(str(value)) == ipaddress.IPv4Address(target["value"])
+            except ValueError:
+                continue
+            if matches:
+                result.append(record)
+                break
+    return result
+
 
 def filter_target_records(records: list[dict[str, Any]], target: dict[str, str]) -> list[dict[str, Any]]:
     wanted = normalize_mac(target["value"]) if target["type"] == "MAC" else clean(target["value"])

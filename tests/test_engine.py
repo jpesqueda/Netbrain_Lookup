@@ -53,3 +53,31 @@ class LookupTests(unittest.TestCase):
         with patch.object(engine,"NO_PROMPT",True), patch("builtins.input",side_effect=AssertionError("Prompt forbidden")):
             with self.assertRaises(engine.NetBrainError):
                 engine.choose([{"name":"a","id":"1"},{"name":"b","id":"2"}],None,"name","id","domain")
+
+    def test_oneip_identity(self):
+        records = [{"ip":"192.0.2.10","description":"192.0.2.1"},{"ip":"192.0.2.1"}]
+        self.assertEqual(engine.filter_oneip_records(records,engine.make_target("192.0.2.1")),[records[1]])
+
+    def test_mocked_cli_pipeline(self):
+        from unittest.mock import patch
+        class FakeClient:
+            def __init__(self,*args): self.last_error=None; self.verbose=False
+            def validate_connection(self): pass
+            def login(self): pass
+            def logout(self): pass
+            def call(self,*args,**kwargs): return {"statusCode":790200}
+            def try_call(self,method,path,**kwargs):
+                if path.endswith("/Tenants"):
+                    return {"tenants":[{"tenantId":"1","tenantName":"LAB"}]}
+                if path.endswith("/Domains"):
+                    return {"domains":[{"domainId":"2","domainName":"LAB"}]}
+                if path.endswith("/OneIPTable"):
+                    return {"OneIPList":[{"ip":"192.0.2.1","mac":"aabb.ccdd.ee01","switchName":"LAB-SW","portName":"Gi1/0/1"}]}
+                return None
+        with tempfile.TemporaryDirectory() as d:
+            out=Path(d)/"report.csv"
+            args=engine.parse_args(["--url","https://netbrain.example.local","-u","LAB","-p","FAKE-PASSWORD","-ho","192.0.2.1","-o",str(out),"--fast","--no-table"])
+            with patch.object(engine,"NetBrain",FakeClient), patch.object(engine,"EVENT",lambda *args:None):
+                self.assertEqual(engine.main(args),0)
+            self.assertIn("LAB-SW",out.read_text(encoding="utf-8-sig"))
+            self.assertNotIn("FAKE-PASSWORD",out.with_suffix(".log").read_text())

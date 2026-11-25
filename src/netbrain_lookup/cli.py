@@ -33,7 +33,7 @@ def execute(args):
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     args = engine.parse_args(argv)
-    if args.interactive or not argv:
+    if args.demo or args.interactive or not argv:
         if not (sys.stdin.isatty() and sys.stdout.isatty()):
             print("Interactive UI requires a terminal. Use CLI arguments instead.", file=sys.stderr)
             return 2
