@@ -159,6 +159,8 @@ COLS = [
     "status",
     "lookup_method",
     "verification",
+    "match_count",
+    "match_index",
     "endpoint_ip",
     "endpoint_mac",
     "endpoint_name",
@@ -200,6 +202,7 @@ IGNORE_KEYS = {"statuscode", "statusdescription", "status", "message", "error", 
 LOG_PATH: Path | None = None
 RUN_START_MONOTONIC: float | None = None
 EVENT = None
+NO_PROMPT = False
 SECRETS = set()
 LOG_LOCK = threading.Lock()
 
@@ -208,7 +211,7 @@ def emit(kind, data):
         EVENT(kind, data)
 
 def redact(message):
-    for secret in sorted(SECRETS, key=len, reverse=True):
+    for secret in sorted(SECRETS.copy(), key=len, reverse=True):
         if secret:
             message = message.replace(secret, '[REDACTED]')
     return message
@@ -743,11 +746,12 @@ def log_execution_summary(
         )
 
 def main(args=None) -> int:
-    global LOG_PATH, RUN_START_MONOTONIC
+    global LOG_PATH, RUN_START_MONOTONIC, NO_PROMPT
     LOG_PATH = None
     RUN_START_MONOTONIC = None
     SECRETS.clear()
     args = args or parse_args()
+    NO_PROMPT = args.non_interactive
     if args.fast:
         args.no_switch_fallback = True
     if args.deep:
@@ -954,6 +958,7 @@ def main(args=None) -> int:
 
     log_execution_summary(rows, args, fallback_stats)
 
+    annotate_matches(rows)
     rows = [{column: row.get(column) or "N/A" for column in COLS} for row in rows]
     write_csv(output, rows)
     if args.raw_json:
@@ -1127,6 +1132,8 @@ GENERIC TEST DATA
     p.add_argument("--workers", type=int, choices=range(1,21), metavar="1-20", default=5)
     p.add_argument("--no-table", action="store_true", help="Suppress terminal results table")
     args = p.parse_args(argv)
+    if args.timeout < 1 or not 0 <= args.retries <= 10 or not 0 <= args.retry_backoff <= 60:
+        p.error("Timeout must be positive; retries 0-10 and backoff 0-60.")
     if args.interactive and args.non_interactive:
         p.error("Interactive modes are mutually exclusive")
     if args.insecure and args.ca_file:
@@ -1172,16 +1179,16 @@ def choose(items: list[dict[str, Any]], wanted: str | None, name: str, item_id: 
             valid = (str(item.get(name, "")).casefold(), str(item.get(item_id, "")).casefold())
             if wanted.casefold() in valid:
                 return item
-        raise NetBrainError(f"No encontre {label}: {wanted}")
+        raise NetBrainError(f"Requested {label} not found: {wanted}")
     if len(items) == 1:
         return items[0]
 
-    if EVENT is not None or not sys.stdin.isatty():
+    if NO_PROMPT or EVENT is not None or not sys.stdin.isatty():
         raise NetBrainError(f"Specify {label}: " + ", ".join(str(item.get(name)) for item in items))
     say(f"\nAvailable {label}s:")
     for i, item in enumerate(items, 1):
         say(f"  {i}. {item.get(name)} [{item.get(item_id)}]")
-    answer = input(f"Select {label} by number/name/ID (Enter to skip): ").strip()
+    answer = input(f"Select {label} by number/name/ID: ").strip()
     if not answer:
         raise NetBrainError(f"{label} selection is required.")
     if answer.isdigit() and 1 <= int(answer) <= len(items):
@@ -1359,37 +1366,31 @@ def lookup(
     oneip_rows, oneip_raw = oneip_lookup(nb, target, scan=scan_oneip, count=oneip_count)
     raw.extend(oneip_raw)
     if direct_rows or oneip_rows:
-        observations = oneip_rows + direct_rows
-        row = observations[0].copy()
-        for candidate in observations[1:]:
-            keys = ("endpoint_ip", "endpoint_mac", "switch_name", "switch_port")
-            if all(not row.get(k) or not candidate.get(k) or clean(row[k]) == clean(candidate[k]) for k in keys):
-                row = merge_rows(row, candidate)
-            else:
-                row["notes"] = "; ".join(filter(None, (row.get("notes"), "Additional conflicting match: review raw data.")))
-        if row["switch_name"] and not row["switch_ip"]:
-            path = "/ServicesAPI/API/V1/CMDB/Devices"
-            result = nb.try_call("GET", path, params={"hostname": row["switch_name"], "fullattr": 1})
-            if result:
-                raw.append({"path": path, "params": {"hostname": row["switch_name"], "fullattr": 1}, "response": result})
-                devices = records_from(result)
-                device = next(
-                    (
-                        item
-                        for item in devices
-                        if clean(pick(
-                            {clean(k): stringify(v) for k, v in flatten(item).items()},
-                            ["hostname", "name"],
-                        )) == clean(row["switch_name"])
-                    ),
-                    None,
-                )
-                if device:
-                    device_flat = {clean(k): stringify(v) for k, v in flatten(device).items()}
-                    row["switch_ip"] = pick(device_flat, ["mgmtip", "managementip", "managementaddress", "deviceip"])
-                    for field, aliases in (("site", ["site", "sitepath"]), ("location", ["loc", "location"])):
-                        row[field] = row[field] or pick(device_flat, aliases)
-        return [row], raw
+        observations = consolidate_observations(oneip_rows + direct_rows)
+        for row in observations:
+            if row["switch_name"] and not row["switch_ip"]:
+                path = "/ServicesAPI/API/V1/CMDB/Devices"
+                result = nb.try_call("GET", path, params={"hostname": row["switch_name"], "fullattr": 1})
+                if result:
+                    raw.append({"path": path, "params": {"hostname": row["switch_name"], "fullattr": 1}, "response": result})
+                    devices = records_from(result)
+                    device = next(
+                        (
+                            item
+                            for item in devices
+                            if clean(pick(
+                                {clean(k): stringify(v) for k, v in flatten(item).items()},
+                                ["hostname", "name"],
+                            )) == clean(row["switch_name"])
+                        ),
+                        None,
+                    )
+                    if device:
+                        device_flat = {clean(k): stringify(v) for k, v in flatten(device).items()}
+                        row["switch_ip"] = pick(device_flat, ["mgmtip", "managementip", "managementaddress", "deviceip"])
+                        for field, aliases in (("site", ["site", "sitepath"]), ("location", ["loc", "location"])):
+                            row[field] = row[field] or pick(device_flat, aliases)
+        return observations, raw
 
     keys = ["ip", "ipAddress", "endSystemIp", "endpointIp"] if target["type"] == "IP" else [
         "mac",
@@ -1418,7 +1419,7 @@ def lookup(
 
     if target["type"] == "IP":
         device = nb.try_call("GET", "/ServicesAPI/API/V1/CMDB/Devices", params={"ip": target["value"], "fullattr": 1})
-        records = records_from(device) if device else []
+        records = filter_target_records(records_from(device), target) if device else []
         if records:
             row = row_from(target, records[0], "device-found-no-switchport", "/ServicesAPI/API/V1/CMDB/Devices")
             row["notes"] = "La IP aparece como dispositivo NetBrain, no como endpoint final."
@@ -2703,8 +2704,9 @@ def filter_target_records(records: list[dict[str, Any]], target: dict[str, str])
             if wanted in candidates:
                 matches.append(record)
         else:
-            normalized = [clean(value) for value in values]
-            if wanted in normalized or any(wanted in value for value in normalized):
+            # Avoid substring matches (192.0.2.1 is not 192.0.2.10).
+            candidates = {clean(ip) for value in values for ip in re.findall(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])", value)}
+            if wanted in candidates:
                 matches.append(record)
     return matches
 
@@ -2729,6 +2731,22 @@ def useful_rows(target: dict[str, str], records: list[dict[str, Any]], source: s
     return [row for row in rows if has_real_endpoint_data(row, target)]
 
 
+def consolidate_observations(rows):
+    """Keep distinct endpoint observations; only merge matching complete identities."""
+    distinct = []
+    fields = ("endpoint_ip", "endpoint_mac", "switch_name", "switch_port")
+    for candidate in rows:
+        identity = tuple(clean(candidate.get(k, "")) for k in fields)
+        match = next((i for i, existing in enumerate(distinct)
+                      if tuple(clean(existing.get(k, "")) for k in fields) == identity
+                      and any(identity)), None)
+        if match is None:
+            distinct.append(candidate.copy())
+        else:
+            distinct[match] = merge_rows(distinct[match], candidate)
+    return distinct
+
+
 def merge_rows(*rows: dict[str, str]) -> dict[str, str]:
     merged = rows[0].copy()
     sources = [merged["source_api"]] if merged["source_api"] else []
@@ -2746,31 +2764,32 @@ def merge_rows(*rows: dict[str, str]) -> dict[str, str]:
 
 def correlate_mac_targets(rows: list[dict[str, str]]) -> None:
     """Reuse verified IP lookup rows to resolve matching MAC targets in the same input."""
-    by_mac: dict[str, dict[str, str]] = {}
+    by_mac = {}
     for row in rows:
         if row.get("status") != "found" or row.get("target_type") != "IP":
             continue
-        mac = row.get("endpoint_mac", "")
-        if mac:
-            try:
-                by_mac.setdefault(normalize_mac(mac), row)
-            except ValueError:
-                continue
-
+        try:
+            mac = normalize_mac(row.get("endpoint_mac", ""))
+        except ValueError:
+            continue
+        by_mac.setdefault(mac, []).append(row)
+    output = []
     for row in rows:
-        # Only a successful primary query that returned no exact match is eligible
-        # for secondary verification. Primary API errors remain ERROR and are logged.
         if row.get("target_type") != "MAC" or row.get("status") != "not-found":
+            output.append(row)
             continue
-        match = by_mac.get(normalize_mac(row["target"]))
-        if not match:
+        matches = by_mac.get(normalize_mac(row["target"]), [])
+        if not matches:
+            output.append(row)
             continue
-        resolved = merge_rows(match, row)
-        resolved.update({"target": row["target"], "target_type": "MAC", "status": "found", "lookup_method": "IP_CORRELATION"})
-        resolved["endpoint_mac"] = normalize_mac(row["target"])
-        note = "MAC correlacionada con un resultado IP del mismo archivo"
-        resolved["notes"] = "; ".join(filter(None, (resolved["notes"], note)))
-        row.update(resolved)
+        for match in consolidate_observations(matches):
+            resolved = match.copy()
+            resolved.update(target=row["target"], target_type="MAC", status="found",
+                            lookup_method="IP_CORRELATION", verification="PRIMARY")
+            resolved["endpoint_mac"] = normalize_mac(row["target"])
+            resolved["notes"] = "; ".join(filter(None, (resolved.get("notes"), "Correlated with IP lookup in the same input.")))
+            output.append(resolved)
+    rows[:] = output
 
 
 def has_real_endpoint_data(row: dict[str, str], target: dict[str, str]) -> bool:
@@ -2978,6 +2997,32 @@ def show_banner() -> None:
     say("=" * width, style="green")
 
 
+def annotate_matches(rows):
+    groups = {}
+    for row in rows:
+        groups.setdefault((row["target_type"], row["target"]), []).append(row)
+    for group in groups.values():
+        found = [r for r in group if r.get("status") == "found"]
+        for i, row in enumerate(found, 1):
+            row["match_count"], row["match_index"] = str(len(found)), str(i)
+        for row in group:
+            if row.get("status") != "found":
+                row["match_count"], row["match_index"] = "0", ""
+
+
+def target_summary(rows):
+    groups = {}
+    for row in rows:
+        groups.setdefault((row["target_type"], row["target"]), set()).add(row["status"])
+    summary = {"total": len(groups), "IP": 0, "MAC": 0, "INVALID": 0,
+               "found": 0, "not-found": 0, "error": 0, "other": 0}
+    for (kind, _), statuses in groups.items():
+        summary[kind] = summary.get(kind, 0) + 1
+        status = next((x for x in ("error", "found", "not-found") if x in statuses), "other")
+        summary[status] += 1
+    return summary
+
+
 def display_search_summary(
     rows: list[dict[str, str]],
     output: Path,
@@ -2985,12 +3030,9 @@ def display_search_summary(
 ) -> None:
     """Display only the concise user-facing summary requested for normal runs."""
     width = 68
-    total = len(rows)
-    ip_targets = sum(row.get("target_type") == "IP" for row in rows)
-    mac_targets = sum(row.get("target_type") == "MAC" for row in rows)
-    found = sum(row.get("status") == "found" for row in rows)
-    not_found = sum(row.get("status") == "not-found" for row in rows)
-    errors = sum(row.get("status") == "error" for row in rows)
+    counts = target_summary(rows)
+    total, ip_targets, mac_targets = counts["total"], counts["IP"], counts["MAC"]
+    found, not_found, errors = counts["found"], counts["not-found"], counts["error"]
 
     say("\n" + "=" * width, style="green")
     say("SUMMARY".center(width), style="green")
@@ -3004,6 +3046,10 @@ def display_search_summary(
     say(f"    Found                  : {found}", style="green")
     say(f"    Not found              : {not_found}", style="green")
     say(f"    Errors                 : {errors}", style="green")
+    if counts["other"]:
+        say(f"    Other                  : {counts['other']}")
+    if len(rows) != total:
+        say(f"    Result rows            : {len(rows)}")
     say("[+] Output", style="green")
     say(f"    CSV report             : {output}", style="green")
     say(f"    Diagnostic log         : {log_path}", style="green")

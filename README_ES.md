@@ -26,4 +26,4 @@ Fast deshabilita la verificación secundaria MAC; Standard la habilita; Deep añ
 
 Reportes CSV + LOG, JSON opcional con --raw-json ruta.json. Los resultados son datos almacenados por NetBrain y no prueban conectividad actual. La TUI mantiene filtros y secciones contraíbles, sin modificar los reportes. Exit durante búsqueda se deshabilita lógicamente para permitir limpieza de sesión.
 
-Limitaciones: IPv4/MAC solamente, TXT de entrada. El motor conserva un resultado principal por target y marca conflictos de observaciones, no exporta todas las coincidencias independientes; usar RAW para investigar. No incluye Excel ni perfiles persistentes. Pruebas live requeridas antes de producción.
+Limitaciones: IPv4/MAC solamente, TXT de entrada. El motor conserva coincidencias directas distintas y añade match_count/match_index; el fallback puede detenerse al resolver todas las MAC, por lo que no garantiza descubrir todas las coincidencias posibles. No incluye Excel ni perfiles persistentes. Pruebas live requeridas antes de producción.

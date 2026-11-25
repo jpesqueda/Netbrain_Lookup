@@ -8,3 +8,4 @@
 - Input/output collision protection, atomic CSV and basic spreadsheet formula protection.
 - Domain selection required; OneIPList shape validation; final error status corrected.
 - Bilingual usage docs, CI, manual TestPyPI and PyPI workflows.
+- Distinct direct observations, per-target summary counts and exact IPv4 matching.

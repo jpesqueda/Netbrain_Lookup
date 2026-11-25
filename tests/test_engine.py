@@ -34,3 +34,22 @@ class LookupTests(unittest.TestCase):
     def test_api_status(self):
         with self.assertRaises(engine.NetBrainAPIError):
             engine.validate_status({"statusCode":790400},"test")
+
+    def test_distinct_observations(self):
+        a = {"target":"192.0.2.1","target_type":"IP","status":"found","endpoint_ip":"192.0.2.1","switch_name":"LAB-A","source_api":"test","notes":""}
+        b = dict(a,switch_name="LAB-B")
+        rows = engine.consolidate_observations([a,b])
+        self.assertEqual(len(rows),2)
+        engine.annotate_matches(rows)
+        self.assertEqual(rows[1]["match_count"],"2")
+        self.assertEqual(engine.target_summary(rows)["found"],1)
+
+    def test_exact_ip(self):
+        rows = [{"ip":"192.0.2.10"},{"ip":"192.0.2.1"}]
+        self.assertEqual(engine.filter_target_records(rows,engine.make_target("192.0.2.1")),[rows[1]])
+
+    def test_non_interactive_selection(self):
+        from unittest.mock import patch
+        with patch.object(engine,"NO_PROMPT",True), patch("builtins.input",side_effect=AssertionError("Prompt forbidden")):
+            with self.assertRaises(engine.NetBrainError):
+                engine.choose([{"name":"a","id":"1"},{"name":"b","id":"2"}],None,"name","id","domain")

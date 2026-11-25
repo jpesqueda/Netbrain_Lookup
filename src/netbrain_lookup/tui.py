@@ -219,13 +219,13 @@ class LookupApp(App):
         elif kind == "result":
             self.rows = data["rows"]
             self.refresh_table()
-            counts = Counter(r["status"] for r in self.rows)
-            types = Counter(r["target_type"] for r in self.rows)
+            counts = engine.target_summary(self.rows)
+            types = counts
             methods = Counter(r["lookup_method"] for r in self.rows)
             self.query_one("#v-input", Static).update(
-                f"Total targets: {len(self.rows)}\nIP targets: {types['IP']}\nMAC targets: {types['MAC']}\nWorkers: {data['workers']}\nMode: {data['mode']}")
+                f"Total targets: {counts['total']}\nIP targets: {types['IP']}\nMAC targets: {types['MAC']}\nWorkers: {data['workers']}\nMode: {data['mode']}")
             self.query_one("#v-summary", Static).update(
-                f"Found: {counts['found']}\nNot found: {counts['not-found']}\nErrors: {counts['error']}\nOther: {len(self.rows)-sum(counts[k] for k in ('found','not-found','error'))}")
+                f"Found: {counts['found']}\nNot found: {counts['not-found']}\nErrors: {counts['error']}\nOther: {counts['other']}\nResult rows: {len(self.rows)}")
             self.query_one("#v-output-summary", Static).update(
                 f"CSV report: {data['output']}\nDiagnostic log: {data['log']}\nExecution time: {data['elapsed']:.2f}s")
             self.query_one("#v-methods", Static).update("\n".join(f"{k}: {v}" for k,v in sorted(methods.items())))
